@@ -245,7 +245,9 @@ case "$1" in
 
             # we need to force updating certificates, in some cases java trust
             # store not get re-generated with latest changes
+            echo "before update-ca-certificates ${date +"%Y-%m-%d %H:%M:%S.%3N"}"
             update-ca-certificates -f
+            echo "after update-ca-certificates ${date +"%Y-%m-%d %H:%M:%S.%3N"}"
 
             CERT_ADDED_TO_TRUST="true"
 
@@ -261,9 +263,10 @@ case "$1" in
 
         if [ "$PROSODY_CONFIG_PRESENT" = "false" ]; then
             invoke-rc.d prosody restart || true
-
+            echo "before sleep ${date +"%Y-%m-%d %H:%M:%S.%3N"}"
             # give it some time to warm up
             sleep 10
+            echo "after sleep ${date +"%Y-%m-%d %H:%M:%S.%3N"}"
 
             if [ "$PROSODY_CREATE_JICOFO_USER" = "true" ]; then
                 # create 'focus@auth.domain' prosody user
@@ -284,9 +287,11 @@ case "$1" in
             # and drop the wait and the prosody restart
             sleep 1
             invoke-rc.d prosody restart || true
+            sleep 5
 
             # In case we had updated the certificates and restarted prosody, let's restart and the bridge and jicofo if possible
             if [ -d /run/systemd/system ] && [ "$CERT_ADDED_TO_TRUST" = "true" ]; then
+            echo "restarting stufffff ${date +"%Y-%m-%d %H:%M:%S.%3N"}"
                 systemctl restart jitsi-videobridge2.service >/dev/null || true
                 systemctl restart jicofo.service >/dev/null || true
             fi
