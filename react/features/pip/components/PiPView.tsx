@@ -3,6 +3,8 @@ import React from 'react';
 import HangupButton from '../../toolbox/components/HangupButton';
 import AudioMuteButton from '../../toolbox/components/web/AudioMuteButton';
 import VideoMuteButton from '../../toolbox/components/web/VideoMuteButton';
+
+import PiPViewContent from './PiPViewContent';
 import CompactLayout from './layouts/CompactLayout';
 
 /**
@@ -19,18 +21,13 @@ const DocumentPiPView: React.FC = () => {
     };
 
     return (
-        <div className = 'doc-pip-container'>
-            <div className = 'doc-pip-video-area'>
-                <div className = 'doc-pip-videos-container'>
-                    {renderLayout()}
-                </div>
-                <div className = 'doc-pip-controls'>
-                    <AudioMuteButton />
-                    <VideoMuteButton />
-                    <HangupButton customClass = 'hangup-button' />
-                </div>
-            </div>
-        </div>
+        <PiPViewContent
+            controls = { <>
+                <AudioMuteButton />
+                <VideoMuteButton />
+                <HangupButton customClass = 'hangup-button' />
+            </> }
+            layout = { renderLayout() } />
     );
 };
 

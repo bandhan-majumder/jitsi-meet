@@ -2,8 +2,15 @@ import { IReduxState } from '../app/types';
 import { MEDIA_TYPE } from '../base/media/constants';
 import StateListenerRegistry from '../base/redux/StateListenerRegistry';
 import { isLocalTrackMuted } from '../base/tracks/functions.any';
+import { isEmbedded } from '../base/util/embedUtils';
 import { getElectronGlobalNS } from '../base/util/helpers';
 
+import {
+    getEmbeddedDocumentPiPState,
+    isEmbeddedDocumentPiPActive,
+    refreshEmbeddedDocumentPiPStream,
+    sendEmbeddedDocumentPiPAvailability
+} from './embedded';
 import { requestPictureInPicture, shouldShowPiP, updateMediaSessionState } from './functions';
 import logger from './logger';
 
@@ -45,9 +52,35 @@ StateListenerRegistry.register(
 );
 
 StateListenerRegistry.register(
+    /* selector */ (state: IReduxState) => {
+        if (!state['features/pip']?.isPiPActive || !isEmbeddedDocumentPiPActive()) {
+            return null;
+        }
+
+        return getEmbeddedDocumentPiPState(state);
+    },
+    /* listener */ (_state: ReturnType<typeof getEmbeddedDocumentPiPState> | null) => {
+        if (_state) {
+            APP.API._sendEvent({
+                data: _state,
+                name: '_document-pip-state'
+            });
+            refreshEmbeddedDocumentPiPStream();
+        }
+    },
+    {
+        deepEquals: true
+    }
+);
+
+StateListenerRegistry.register(
     /* selector */ shouldShowPiP,
     /* listener */ (_shouldShowPiP: boolean) => {
         const electronNS = getElectronGlobalNS();
+
+        if (isEmbedded()) {
+            sendEmbeddedDocumentPiPAvailability(_shouldShowPiP);
+        }
 
         if (_shouldShowPiP) {
             // Expose requestPictureInPicture for Electron main process.

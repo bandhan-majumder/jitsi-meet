@@ -11,6 +11,7 @@ import { getThumbnailBackgroundColor } from '../../filmstrip/functions.web';
 import { getLargeVideoParticipant } from '../../large-video/functions';
 import { isPrejoinPageVisible } from '../../prejoin/functions.any';
 import { handlePiPLeaveEvent, handlePipEnterEvent, handleWindowBlur, handleWindowFocus } from '../actions';
+import { refreshEmbeddedDocumentPiPStream } from '../embedded';
 import { getPiPVideoTrack } from '../functions';
 import { useCanvasAvatar, useDocumentPiPMediaSession } from '../hooks';
 import logger from '../logger';
@@ -115,8 +116,17 @@ const PiPVideoElement: React.FC = () => {
                 videoElement.srcObject = canvasStream;
             }
         } else if (videoTrack?.jitsiTrack) {
+            if (videoElement.srcObject) {
+                videoElement.srcObject = null;
+            }
+
             // Attach real video track.
             videoTrack.jitsiTrack.attach(videoElement)
+                .then(() => {
+                    window.setTimeout(() => {
+                        refreshEmbeddedDocumentPiPStream();
+                    }, 0);
+                })
                 .catch((error: Error) => {
                     logger.error('Error attaching video track:', error);
                 });

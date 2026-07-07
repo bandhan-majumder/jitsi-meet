@@ -109,6 +109,7 @@
 }
 
 .doc-pip-controls .toolbox-icon {
+    align-items: center;
     display: flex;
     border-radius: 3px;
     flex-direction: column;
@@ -118,6 +119,10 @@
     width: 48px;
     background: transparent;
     transition: background 0.15s ease;
+}
+
+.doc-pip-controls .toolbox-icon svg {
+    fill: #FFFFFF;
 }
 
 @media (hover: hover) and (pointer: fine) {

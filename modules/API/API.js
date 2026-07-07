@@ -107,7 +107,20 @@ import {
     open as openParticipantsPane
 } from '../../react/features/participants-pane/actions';
 import { getParticipantsPaneOpen } from '../../react/features/participants-pane/functions';
-import { hidePiP, showPiP } from '../../react/features/pip/actions';
+import {
+    handleEmbeddedDocumentPiPCommand,
+    handleEmbeddedDocumentPiPConnectionStateChanged,
+    handleEmbeddedDocumentPiPOpenFailed,
+    handleEmbeddedDocumentPiPOpened,
+    handleEmbeddedDocumentPiPReconnect,
+    handleEmbeddedDocumentPiPWindowClosed,
+    hidePiP,
+    showPiP
+} from '../../react/features/pip/actions';
+import {
+    handleEmbeddedDocumentPiPAnswer,
+    handleEmbeddedDocumentPiPIce
+} from '../../react/features/pip/embedded';
 import {
     setStartRecordingIntent,
     setStopRecordingIntent,
@@ -982,6 +995,30 @@ function initCommands() {
         },
         'hide-pip': () => {
             APP.store.dispatch(hidePiP());
+        },
+        'document-pip-opened': () => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPOpened());
+        },
+        'document-pip-open-failed': error => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPOpenFailed(error));
+        },
+        'document-pip-closed': () => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPWindowClosed());
+        },
+        'document-pip-answer': answer => {
+            handleEmbeddedDocumentPiPAnswer(answer);
+        },
+        'document-pip-ice': candidate => {
+            handleEmbeddedDocumentPiPIce(candidate);
+        },
+        'document-pip-command': command => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPCommand(command));
+        },
+        'document-pip-connection-state': state => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPConnectionStateChanged(state));
+        },
+        'document-pip-reconnect': () => {
+            APP.store.dispatch(handleEmbeddedDocumentPiPReconnect());
         }
     };
     transport.on('event', ({ data, name }) => {

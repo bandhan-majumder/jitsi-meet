@@ -3,9 +3,10 @@ import { useDispatch } from 'react-redux';
 
 import IconUserSVG from '../base/icons/svg/user.svg?raw';
 import { IParticipant } from '../base/participants/types';
+import { isEmbedded } from '../base/util/embedUtils';
 import { TILE_ASPECT_RATIO } from '../filmstrip/constants';
 
-import { setPiPActive } from './actions';
+import { openDocumentPiP, setPiPActive } from './actions';
 import {
     clearPiPWindow,
     getStoredPiPWindow,
@@ -208,7 +209,13 @@ export function useDocumentPiPMediaSession() {
     const dispatch = useDispatch();
     const pipWindowRef = useRef<Window | null>(null);
 
-    const openDocumentPip = useCallback(async () => {
+    const openDocumentPip = useCallback(async (reason?: string) => {
+        if (isEmbedded()) {
+            dispatch(openDocumentPiP(reason));
+
+            return;
+        }
+
         if (!isDocumentPiPSupported()) {
             return;
         }
@@ -243,7 +250,7 @@ export function useDocumentPiPMediaSession() {
     }, [ dispatch ]);
 
     useEffect(() => {
-        if (!isDocumentPiPSupported()) {
+        if (!isEmbedded() && !isDocumentPiPSupported()) {
             return;
         }
 
@@ -258,7 +265,7 @@ export function useDocumentPiPMediaSession() {
                     logger.log('Automatically enter picture-in-picture.');
                 }
 
-                await openDocumentPip();
+                await openDocumentPip(reason);
             });
         } catch (error) {
             logger.warn('enterpictureinpicture MediaSession action not supported:', error);
@@ -267,10 +274,10 @@ export function useDocumentPiPMediaSession() {
         return () => {
             navigator.mediaSession.setActionHandler('enterpictureinpicture' as any, null);
         };
-    }, [openDocumentPip]);
+    }, [ openDocumentPip ]);
 
     useEffect(() => {
-        if (!isDocumentPiPSupported()) {
+        if (isEmbedded() || !isDocumentPiPSupported()) {
             return;
         }
 

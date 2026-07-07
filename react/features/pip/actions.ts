@@ -1,10 +1,24 @@
 import { IStore } from '../app/types';
+import { leaveConference } from '../base/conference/actions';
 import { MEDIA_TYPE } from '../base/media/constants';
 import { isLocalTrackMuted } from '../base/tracks/functions.any';
+import { isEmbedded } from '../base/util/embedUtils';
 import { handleToggleVideoMuted } from '../toolbox/actions.any';
 import { muteLocal } from '../video-menu/actions.any';
 
 import { SET_PIP_ACTIVE } from './actionTypes';
+import {
+    closeEmbeddedDocumentPiP,
+    handleEmbeddedDocumentPiPClosed,
+    handleEmbeddedDocumentPiPConnectionState,
+    requestEmbeddedDocumentPiP,
+    scheduleEmbeddedDocumentPiPReconnect,
+    sendEmbeddedDocumentPiPAvailability,
+    sendEmbeddedDocumentPiPState,
+    setEmbeddedDocumentPiPActive,
+    setEmbeddedDocumentPiPIdle,
+    startEmbeddedDocumentPiPStream
+} from './embedded';
 import {
     cleanupMediaSessionHandlers,
     clearPiPWindow,
@@ -80,6 +94,10 @@ export function toggleVideoFromPiP() {
 export function exitPiP() {
     return (dispatch: IStore['dispatch']) => {
         logger.debug('exitPiP called');
+
+        if (isEmbedded()) {
+            closeEmbeddedDocumentPiP();
+        }
 
         const pipWindow = getStoredPiPWindow();
 
@@ -193,7 +211,7 @@ export function showPiP() {
         }
 
         if (!isPiPActive) {
-            if (isDocumentPiPSupported()) {
+            if (isEmbedded() || isDocumentPiPSupported()) {
                 dispatch(openDocumentPiP());
             } else {
                 const videoElement = document.getElementById('pipVideo') as HTMLVideoElement;
@@ -230,7 +248,17 @@ export function hidePiP() {
 }
 
 export function enterPiP() {
-    return (dispatch: IStore["dispatch"]) => {
+    return (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        if (isEmbedded()) {
+            if (getState()['features/pip']?.isPiPActive) {
+                dispatch(exitPiP());
+            } else {
+                dispatch(openDocumentPiP());
+            }
+
+            return;
+        }
+
         if (isDocumentPiPSupported()) {
             const pipWindow = getDocumentPiPWindow();
 
@@ -249,17 +277,35 @@ export function enterPiP() {
     };
 }
 
-export function openDocumentPiP() {
-    return (dispatch: IStore["dispatch"], getState: IStore["getState"]) => {
+export function openDocumentPiP(reason?: string) {
+    return (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        const state = getState();
+        const pipConfig = state['features/base/config']?.pip;
+        const docPiPConfig = pipConfig?.documentPiP?.windowOptions;
+
+        if (isEmbedded()) {
+            if (!shouldShowPiP(state)) {
+                sendEmbeddedDocumentPiPAvailability(false);
+
+                return;
+            }
+
+            if (docPiPPending) {
+                logger.debug('Embedded Document PiP request already pending, skipping duplicate request');
+
+                return;
+            }
+
+            docPiPPending = requestEmbeddedDocumentPiP(state, reason);
+
+            return;
+        }
+
         if (!isDocumentPiPSupported()) {
             logger.warn("Document Picture-in-Picture not supported, use Video PiP button");
 
             return;
         }
-
-        const state = getState();
-        const pipConfig = state["features/base/config"]?.pip;
-        const docPiPConfig = pipConfig?.documentPiP.windowOptions;
 
         if (isDocumentPiPOpen() || getStoredPiPWindow()) {
             return;
@@ -311,10 +357,98 @@ export function openDocumentPiP() {
                 });
         } catch (error) {
             docPiPPending = false;
-            logger.error("Failed to open Document PiP:", error);
+            logger.error('Failed to open Document PiP:', error);
             dispatch(setPiPActive(false));
 
             throw error;
         }
+    };
+}
+
+export function handleEmbeddedDocumentPiPOpened() {
+    return async (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        const state = getState();
+
+        docPiPPending = false;
+
+        if (!shouldShowPiP(state)) {
+            closeEmbeddedDocumentPiP();
+            setEmbeddedDocumentPiPIdle();
+
+            return;
+        }
+
+        setEmbeddedDocumentPiPActive();
+        dispatch(setPiPActive(true));
+        APP.API.notifyPictureInPictureEntered();
+        sendEmbeddedDocumentPiPAvailability(true);
+        sendEmbeddedDocumentPiPState(state);
+
+        try {
+            const streamStarted = await startEmbeddedDocumentPiPStream();
+
+            if (!streamStarted) {
+                logger.warn('Embedded Document PiP opened before stream was ready; waiting for retry');
+            }
+        } catch (error) {
+            logger.error('Failed to start embedded Document PiP stream:', error);
+            scheduleEmbeddedDocumentPiPReconnect();
+            sendEmbeddedDocumentPiPState(getState());
+        }
+    };
+}
+
+export function handleEmbeddedDocumentPiPOpenFailed(error?: { reason?: string; }) {
+    return (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        docPiPPending = false;
+        logger.warn('Embedded Document PiP open failed:', error?.reason);
+        setEmbeddedDocumentPiPIdle();
+        dispatch(setPiPActive(false));
+        sendEmbeddedDocumentPiPAvailability(shouldShowPiP(getState()));
+    };
+}
+
+export function handleEmbeddedDocumentPiPWindowClosed() {
+    return (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        docPiPPending = false;
+        handleEmbeddedDocumentPiPClosed();
+        dispatch(setPiPActive(false));
+        sendEmbeddedDocumentPiPAvailability(shouldShowPiP(getState()));
+        APP.API.notifyPictureInPictureLeft();
+    };
+}
+
+export function handleEmbeddedDocumentPiPCommand(command: string) {
+    return (dispatch: IStore['dispatch'], getState: IStore['getState']) => {
+        switch (command) {
+        case 'toggle-audio':
+            dispatch(toggleAudioFromPiP());
+            window.setTimeout(() => sendEmbeddedDocumentPiPState(getState()), 0);
+            break;
+        case 'toggle-video':
+            dispatch(toggleVideoFromPiP());
+            window.setTimeout(() => sendEmbeddedDocumentPiPState(getState()), 0);
+            break;
+        case 'hangup':
+            closeEmbeddedDocumentPiP();
+            dispatch(leaveConference());
+            break;
+        }
+    };
+}
+
+export function handleEmbeddedDocumentPiPReconnect() {
+    return () => {
+        scheduleEmbeddedDocumentPiPReconnect();
+    };
+}
+
+export function handleEmbeddedDocumentPiPConnectionStateChanged(state: {
+    connectionState?: string;
+    error?: string;
+    iceConnectionState?: string;
+}) {
+    return () => {
+        handleEmbeddedDocumentPiPConnectionState(state);
     };
 }

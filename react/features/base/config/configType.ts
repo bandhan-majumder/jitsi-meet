@@ -600,9 +600,10 @@ export interface IConfig {
         disabled?: boolean;
         showOnPrejoin?: boolean;
         showToolbarButton?: boolean;
-        documentPiP: {
+        documentPiP?: {
+            embedMode?: 'auto' | 'disabled';
             // @see: https://developer.chrome.com/docs/web-platform/document-picture-in-picture#methods
-            windowOptions: {
+            windowOptions?: {
                 width: number;
                 height: number;
                 disallowReturnToOpener?: boolean;

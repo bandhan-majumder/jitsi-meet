@@ -22,6 +22,8 @@ const ALWAYS_ON_TOP_FILENAMES = [
     'css/all.css', 'libs/alwaysontop.min.js'
 ];
 
+const DOCUMENT_PIP_MESSAGE_TYPE = 'jitsi-document-pip';
+
 /**
  * Maps the names of the commands expected by the API with the name of the
  * commands expected by jitsi-meet.
@@ -125,6 +127,7 @@ const events = {
     'data-channel-closed': 'dataChannelClosed',
     'data-channel-opened': 'dataChannelOpened',
     'device-list-changed': 'deviceListChanged',
+    'document-pip-open-failed': 'documentPipOpenFailed',
     'display-name-change': 'displayNameChange',
     'dominant-speaker-changed': 'dominantSpeakerChanged',
     'email-change': 'emailChange',
@@ -341,6 +344,14 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
         this._onStageParticipant = undefined;
         this._iAmvisitor = undefined;
         this._pipConfig = configOverwrite?.pip;
+        this._documentPiP = null;
+        this._documentPiPAvailable = false;
+        this._documentPiPClosing = false;
+        this._documentPiPRendererReady = false;
+        this._documentPiPMediaSessionHandler = null;
+        this._documentPiPMessageListener = this._onDocumentPiPMessage.bind(this);
+        this._documentPiPWindowMessageListener = this._onDocumentPiPMessage.bind(this);
+        this._documentPiPPortMessageListener = this._onDocumentPiPPortMessage.bind(this);
         this._setupListeners();
         id++;
     }
@@ -628,6 +639,24 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
             case 'video-quality-changed':
                 this._videoQuality = data.videoQuality;
                 break;
+            case 'video-ready-to-close':
+                this._documentPiPAvailable = false;
+                this._teardownDocumentPiPMediaSession();
+                this._closeDocumentPiP();
+                break;
+            case '_document-pip-requested':
+            case '_document-pip-availability':
+            case '_document-pip-state':
+            case '_document-pip-close':
+            case '_document-pip-offer':
+            case '_document-pip-ice':
+            case '_document-pip-open-failed':
+                this._handleDocumentPiPEvent(
+                    name,
+                    Object.prototype.hasOwnProperty.call(data, 'data') ? data.data : data
+                );
+
+                return true;
             case 'breakout-rooms-updated':
                 this.updateNumberOfParticipants(data.rooms);
                 break;
@@ -710,6 +739,388 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
             this._intersectionObserver.disconnect();
             this._intersectionObserver = null;
         }
+    }
+
+    /**
+     * Returns whether the embedding page can own Document PiP MediaSession
+     * handling.
+     *
+     * @returns {boolean}
+     * @private
+     */
+    _canUseDocumentPiPMediaSession() {
+        return window === window.top
+            && window.isSecureContext
+            && 'documentPictureInPicture' in window
+            && 'mediaSession' in navigator
+            && typeof navigator.mediaSession?.setActionHandler === 'function';
+    }
+
+    /**
+     * Installs the top-level MediaSession handler used by Chrome to request
+     * PiP when the tab is occluded.
+     *
+     * @returns {void}
+     * @private
+     */
+    _setupDocumentPiPMediaSession() {
+        if (!isPiPEnabled(this._pipConfig)
+                || !this._documentPiPAvailable
+                || this._documentPiPMediaSessionHandler
+                || !this._canUseDocumentPiPMediaSession()) {
+            return;
+        }
+
+        this._documentPiPMediaSessionHandler = details => {
+            const reason = details?.enterPictureInPictureReason;
+
+            this._openDocumentPiP(this._pipConfig?.documentPiP?.windowOptions, reason)
+                .catch(error => {
+                    console.warn('Failed to open Document PiP from MediaSession:', error);
+                });
+        };
+
+        try {
+            navigator.mediaSession.setActionHandler(
+                'enterpictureinpicture',
+                this._documentPiPMediaSessionHandler
+            );
+        } catch (error) {
+            this._documentPiPMediaSessionHandler = null;
+            console.warn('enterpictureinpicture MediaSession action not supported:', error);
+        }
+    }
+
+    /**
+     * Removes the top-level MediaSession handler if this API instance installed
+     * it.
+     *
+     * @returns {void}
+     * @private
+     */
+    _teardownDocumentPiPMediaSession() {
+        if (!this._documentPiPMediaSessionHandler || !this._canUseDocumentPiPMediaSession()) {
+            this._documentPiPMediaSessionHandler = null;
+
+            return;
+        }
+
+        try {
+            navigator.mediaSession.setActionHandler('enterpictureinpicture', null);
+        } catch (error) {
+            console.warn('Failed to clear enterpictureinpicture MediaSession action:', error);
+        }
+
+        this._documentPiPMediaSessionHandler = null;
+    }
+
+    /**
+     * Keeps the top-level MediaSession handler in sync with child PiP
+     * availability.
+     *
+     * @returns {void}
+     * @private
+     */
+    _updateDocumentPiPMediaSession() {
+        if (isPiPEnabled(this._pipConfig) && this._documentPiPAvailable) {
+            this._setupDocumentPiPMediaSession();
+        } else {
+            this._teardownDocumentPiPMediaSession();
+        }
+    }
+
+    /**
+     * Sends an internal command to the embedded meeting iframe.
+     *
+     * @param {string} name - Command name.
+     * @param {...any} args - Command arguments.
+     * @returns {void}
+     * @private
+     */
+    _sendDocumentPiPCommand(name, ...args) {
+        this._transport.sendEvent({
+            data: args,
+            name
+        });
+    }
+
+    /**
+     * Sends a message to the renderer iframe inside the Document PiP window.
+     *
+     * @param {string} name - Message name.
+     * @param {Object} data - Message payload.
+     * @returns {void}
+     * @private
+     */
+    _postDocumentPiPToRenderer(name, data) {
+        const port = this._documentPiP?.port;
+        const renderer = this._documentPiP?.renderer;
+        const targetOrigin = this._documentPiP?.origin;
+
+        if (port) {
+            port.postMessage({
+                data,
+                name,
+                type: DOCUMENT_PIP_MESSAGE_TYPE
+            });
+
+            return;
+        }
+
+        if (!renderer?.contentWindow || !targetOrigin) {
+            return;
+        }
+
+        renderer.contentWindow.postMessage({
+            data,
+            name,
+            type: DOCUMENT_PIP_MESSAGE_TYPE
+        }, targetOrigin);
+    }
+
+    /**
+     * Handles messages sent through the dedicated Document PiP MessagePort.
+     *
+     * @param {MessageEvent} event - MessagePort event.
+     * @returns {void}
+     * @private
+     */
+    _onDocumentPiPPortMessage(event) {
+        if (event.data?.type !== DOCUMENT_PIP_MESSAGE_TYPE) {
+            return;
+        }
+
+        this._handleDocumentPiPRendererMessage(event.data.name, event.data.data);
+    }
+
+    /**
+     * Emits and forwards a Document PiP open failure.
+     *
+     * @param {string} reason - Failure reason.
+     * @param {string} [requestReason] - Original request reason.
+     * @returns {void}
+     * @private
+     */
+    _notifyDocumentPiPOpenFailed(reason, requestReason) {
+        const data = {
+            reason,
+            requestReason
+        };
+
+        this._sendDocumentPiPCommand('document-pip-open-failed', data);
+        this.emit('documentPipOpenFailed', data);
+    }
+
+    /**
+     * Handles messages sent by the Document PiP renderer iframe.
+     *
+     * @param {MessageEvent} event - Browser message event.
+     * @returns {void}
+     * @private
+     */
+    _onDocumentPiPMessage(event) {
+        const renderer = this._documentPiP?.renderer;
+
+        if (!renderer?.contentWindow
+                || event.source !== renderer.contentWindow
+                || event.origin !== this._documentPiP.origin
+                || event.data?.type !== DOCUMENT_PIP_MESSAGE_TYPE) {
+            return;
+        }
+
+        this._handleDocumentPiPRendererMessage(event.data.name, event.data.data);
+    }
+
+    /**
+     * Handles decoded messages from the Document PiP renderer.
+     *
+     * @param {string} name - Message name.
+     * @param {Object} data - Message payload.
+     * @returns {void}
+     * @private
+     */
+    _handleDocumentPiPRendererMessage(name, data) {
+
+        switch (name) {
+        case 'ready':
+            if (this._documentPiPRendererReady) {
+                return;
+            }
+
+            this._documentPiPRendererReady = true;
+            this._sendDocumentPiPCommand('document-pip-opened');
+            break;
+        case 'answer':
+            this._sendDocumentPiPCommand('document-pip-answer', data);
+            break;
+        case 'ice':
+            this._sendDocumentPiPCommand('document-pip-ice', data);
+            break;
+        case 'connection-state':
+            this._sendDocumentPiPCommand('document-pip-connection-state', data);
+            break;
+        case 'reconnect':
+            this._sendDocumentPiPCommand('document-pip-reconnect');
+            break;
+        case 'command':
+            this._sendDocumentPiPCommand('document-pip-command', data);
+            break;
+        }
+    }
+
+    /**
+     * Handles internal Document PiP events from the embedded meeting iframe.
+     *
+     * @param {string} name - Event name.
+     * @param {Object} data - Event payload.
+     * @returns {Promise<void>}
+     * @private
+     */
+    async _handleDocumentPiPEvent(name, data = {}) {
+        switch (name) {
+        case '_document-pip-availability':
+            this._documentPiPAvailable = Boolean(data.available);
+            this._updateDocumentPiPMediaSession();
+            this.emit('documentPipAvailabilityChanged', data);
+            break;
+        case '_document-pip-requested':
+            await this._openDocumentPiP(data.options, data.reason);
+            break;
+        case '_document-pip-state':
+            this._postDocumentPiPToRenderer('state', data);
+            break;
+        case '_document-pip-close':
+            this._closeDocumentPiP();
+            break;
+        case '_document-pip-offer':
+            this._postDocumentPiPToRenderer('offer', data);
+            break;
+        case '_document-pip-ice':
+            this._postDocumentPiPToRenderer('ice', data);
+            break;
+        case '_document-pip-open-failed':
+            if (this._documentPiP?.window && !this._documentPiP.window.closed) {
+                this._postDocumentPiPToRenderer('state', {
+                    connectionState: 'failed',
+                    error: data
+                });
+            } else {
+                this._closeDocumentPiP();
+            }
+            break;
+        }
+    }
+
+    /**
+     * Opens a Document PiP window owned by the embedding page.
+     *
+     * @param {Object} options - Document PiP window options.
+     * @param {string} [requestReason] - Original request reason.
+     * @returns {Promise<void>}
+     * @private
+     */
+    async _openDocumentPiP(options = {}, requestReason) {
+        if (!isPiPEnabled(this._pipConfig)) {
+            this._notifyDocumentPiPOpenFailed('disabled', requestReason);
+
+            return;
+        }
+
+        if (window !== window.top) {
+            this._notifyDocumentPiPOpenFailed('not-top-level', requestReason);
+
+            return;
+        }
+
+        if (!('documentPictureInPicture' in window)) {
+            this._notifyDocumentPiPOpenFailed('unsupported', requestReason);
+
+            return;
+        }
+
+        if (this._documentPiP?.window && !this._documentPiP.window.closed) {
+            this._sendDocumentPiPCommand('document-pip-opened');
+
+            return;
+        }
+
+        try {
+            const pipWindow = await window.documentPictureInPicture.requestWindow(options);
+            const channel = new MessageChannel();
+            const origin = new URL(this._url).origin;
+            const rendererURL = new URL('/static/document-pip.html', this._url);
+            const renderer = pipWindow.document.createElement('iframe');
+
+            pipWindow.document.body.style.cssText = 'margin:0;overflow:hidden;background:#141517;';
+            renderer.allow = 'autoplay';
+            renderer.style.cssText = 'border:0;width:100vw;height:100vh;display:block;';
+            renderer.src = rendererURL.toString();
+
+            this._documentPiPRendererReady = false;
+            this._documentPiP = {
+                origin,
+                port: channel.port1,
+                renderer,
+                window: pipWindow
+            };
+
+            channel.port1.addEventListener('message', this._documentPiPPortMessageListener);
+            channel.port1.start();
+            window.addEventListener('message', this._documentPiPMessageListener);
+            pipWindow.addEventListener('message', this._documentPiPWindowMessageListener);
+            renderer.addEventListener('load', () => {
+                renderer.contentWindow?.postMessage({
+                    name: 'init',
+                    type: DOCUMENT_PIP_MESSAGE_TYPE
+                }, origin, [ channel.port2 ]);
+            }, { once: true });
+
+            pipWindow.document.body.appendChild(renderer);
+
+            pipWindow.addEventListener('pagehide', () => {
+                if (this._documentPiP && !this._documentPiPClosing) {
+                    this._sendDocumentPiPCommand('document-pip-closed');
+                }
+                this._clearDocumentPiP();
+            }, { once: true });
+        } catch (error) {
+            const reason = error?.name === 'NotAllowedError'
+                ? 'activation-required'
+                : error?.name || 'open-failed';
+
+            this._notifyDocumentPiPOpenFailed(reason, requestReason);
+        }
+    }
+
+    /**
+     * Clears Document PiP references and listeners.
+     *
+     * @returns {void}
+     * @private
+     */
+    _clearDocumentPiP() {
+        window.removeEventListener('message', this._documentPiPMessageListener);
+        this._documentPiP?.window?.removeEventListener('message', this._documentPiPWindowMessageListener);
+        this._documentPiP?.port?.removeEventListener('message', this._documentPiPPortMessageListener);
+        this._documentPiP?.port?.close();
+        this._documentPiP = null;
+        this._documentPiPClosing = false;
+        this._documentPiPRendererReady = false;
+    }
+
+    /**
+     * Closes a host-assisted Document PiP window if one exists.
+     *
+     * @returns {void}
+     * @private
+     */
+    _closeDocumentPiP() {
+        if (this._documentPiP?.window && !this._documentPiP.window.closed) {
+            this._documentPiPClosing = true;
+            this._documentPiP.window.close();
+        }
+
+        this._clearDocumentPiP();
     }
 
     /**
@@ -914,6 +1325,8 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
      */
     dispose() {
         this.emit('_willDispose');
+        this._closeDocumentPiP();
+        this._teardownDocumentPiPMediaSession();
         this._transport.dispose();
         this.removeAllListeners();
         this._teardownIntersectionObserver();
@@ -964,9 +1377,11 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
 
             if (!wasEnabled && isEnabled) {
                 this._setupIntersectionObserver();
+                this._updateDocumentPiPMediaSession();
                 pipTransition = 'enabled';
             } else if (wasEnabled && !isEnabled) {
                 this._teardownIntersectionObserver();
+                this._teardownDocumentPiPMediaSession();
                 pipTransition = 'disabled';
             }
         }
@@ -985,6 +1400,7 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
             }
         } else if (pipTransition === 'disabled') {
             // Hide any open PiP window.
+            this._closeDocumentPiP();
             this.hidePiP();
         }
     }
@@ -1610,11 +2026,22 @@ export default class JitsiMeetExternalAPI extends EventEmitter {
     }
 
     /**
+     * Opens a host-owned Document Picture-in-Picture window for embedded meetings.
+     * This should be called from a top-level page user gesture.
+     *
+     * @returns {Promise<void>}
+     */
+    openDocumentPiP() {
+        return this._openDocumentPiP(this._pipConfig?.documentPiP?.windowOptions);
+    }
+
+    /**
      * Hides Picture-in-Picture window.
      *
      * @returns {void}
      */
     hidePiP() {
+        this._closeDocumentPiP();
         this.executeCommand('hidePiP');
     }
 

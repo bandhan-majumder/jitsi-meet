@@ -22,10 +22,15 @@ function isElectron(): boolean {
  * @param {Object} pipConfig - The pip config object.
  * @returns {boolean} - True if PiP is enabled.
  */
-export function isPiPEnabled(pipConfig?: { disabled?: boolean; }): boolean {
+export function isPiPEnabled(pipConfig?: {
+    disabled?: boolean;
+    documentPiP?: {
+        embedMode?: 'auto' | 'disabled';
+    };
+}): boolean {
     if (pipConfig?.disabled) {
         return false;
     }
 
-    return isElectron();
+    return isElectron() || pipConfig?.documentPiP?.embedMode === 'auto';
 }
